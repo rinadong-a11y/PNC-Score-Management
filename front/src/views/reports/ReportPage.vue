@@ -1,0 +1,671 @@
+<template>
+  <div class="report-page" :class="{ 'dark-mode': isDark }">
+    <div v-if="error" class="rp-error">
+      <AlertTriangle :size="16" />
+      <span>{{ error }}</span>
+      <button class="rp-error-retry" @click="loadAll"><RefreshCw :size="13" /> {{ t('retry') }}</button>
+    </div>
+
+    <LoadingState v-if="loading" :message="t('reports.compiling')" />
+
+    <div v-else class="rp-card">
+      <DataTable
+        :columns="studentColumns"
+        :data="paginatedRows"
+        :row-key="(row) => row.student_id"
+        @row-dblclick="(row) => openReportCard(row.student_id)"
+      >
+        <template #header>
+          <div class="rp-table-head">
+            <div class="rp-table-head-top">
+              <div>
+                <h3 class="rp-table-title">{{ t('reports.studentRanking') }}</h3>
+                <p class="rp-table-sub">
+                  {{ filteredStudentRows.length }} {{ t('reports.students') }}
+                </p>
+              </div>
+              <div class="d-flex align-items-center gap-2">
+                <SearchInput v-model="studentSearch" :placeholder="t('reports.searchPlaceholder')" />
+                <div v-if="canExport" class="rp-export">
+                  <button class="rp-btn rp-btn-primary" :disabled="!filteredStudentRows.length" @click="showExportMenu = !showExportMenu">
+                    <Download :size="14" /> {{ t('activityLog.export') }}
+                    <ChevronDown :size="13" />
+                  </button>
+                  <div v-if="showExportMenu" class="rp-export-menu">
+                    <button @click="runExport('pdf')"><FileText :size="14" /> {{ t('reports.exportPdf') }}</button>
+                    <button @click="runExport('xlsx')"><Sheet :size="14" /> {{ t('reports.exportExcel') }}</button>
+                    <button @click="runExport('csv')"><FileSpreadsheet :size="14" /> {{ t('reports.exportCsv') }}</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="rp-table-filters">
+              <div class="rp-filter">
+                <label>{{ t('reports.academicYear') }}</label>
+                <select v-model="filters.academic_year_id" class="rp-select">
+                  <option :value="null">{{ t('reports.allYears') }}</option>
+                  <option v-for="year in options.academic_years" :key="year.id" :value="year.id">{{ year.name }}</option>
+                </select>
+              </div>
+              <div class="rp-filter">
+                <label>{{ t('reports.term') }}</label>
+                <select v-model="filters.term_id" class="rp-select">
+                  <option :value="null">{{ t('reports.allTerms') }}</option>
+                  <option v-for="term in options.terms" :key="term.id" :value="term.id">{{ term.name }}</option>
+                </select>
+              </div>
+              <div class="rp-filter">
+                <label>{{ t('reports.class') }}</label>
+                <select v-model="filters.class_id" class="rp-select">
+                  <option :value="null">{{ t('reports.allClasses') }}</option>
+                  <option v-for="cls in options.classes" :key="cls.id" :value="cls.id">{{ cls.name }}</option>
+                </select>
+              </div>
+              <div class="rp-filter">
+                <label>{{ t('reports.subject') }}</label>
+                <select v-model="filters.subject_id" class="rp-select">
+                  <option :value="null">{{ t('reports.allSubjects') }}</option>
+                  <option v-for="subject in options.subjects" :key="subject.id" :value="subject.id">{{ subject.name }}</option>
+                </select>
+              </div>
+              <div class="rp-filter">
+                <label>{{ t('reports.teacher') }}</label>
+                <select v-model="filters.teacher_id" class="rp-select">
+                  <option :value="null">{{ t('reports.allTeachers') }}</option>
+                  <option v-for="teacher in options.teachers" :key="teacher.id" :value="teacher.id">{{ teacher.name }}</option>
+                </select>
+              </div>
+              <div class="rp-filter">
+                <label>{{ t('classes.generation') }}</label>
+                <select v-model="filters.generation_id" class="rp-select">
+                  <option :value="null">{{ t('reports.allGenerations') }}</option>
+                  <option v-for="gen in options.generations" :key="gen.id" :value="gen.id">{{ gen.name }}</option>
+                </select>
+              </div>
+              <button v-if="activeFilterCount > 0" class="rp-clear" @click="clearFilters">
+                <XCircle :size="14" /> {{ t('reports.clear') }} ({{ activeFilterCount }})
+              </button>
+            </div>
+          </div>
+        </template>
+        <template #cell-rank="{ row }">
+          <span class="rp-rank" :class="rankClass(row.rank)">{{ row.rank }}</span>
+        </template>
+        <template #cell-total="{ row }">{{ row.total.toFixed(2) }}</template>
+        <template #cell-average="{ row }">
+          <strong>{{ row.average.toFixed(2) }}</strong>
+        </template>
+        <template #cell-grade="{ row }">
+          <span class="rp-grade" :style="gradeStyle(row.grade)">{{ row.grade ?? '—' }}</span>
+        </template>
+        <template #cell-result="{ row }">
+          <span class="rp-result" :class="row.result === 'pass' ? 'is-pass' : 'is-fail'">
+            {{ row.result === 'pass' ? t('pass').toUpperCase() : t('fail').toUpperCase() }}
+          </span>
+          <span v-if="row.failed_subjects > 0" class="rp-muted"> ({{ row.failed_subjects }} {{ t('reports.failed') }})</span>
+        </template>
+        <template #cell-actions="{ row }">
+          <button class="rp-row-btn" @click="openReportCard(row.student_id)">
+            <FileText :size="13" /> {{ t('reports.reportCard') }}
+          </button>
+        </template>
+        <template #footer>
+          <div v-if="filteredStudentRows.length > 0" class="pagination-bar">
+            <div class="pagination-info">
+              <span class="rows-label">{{ t('common.rowsPerPage') }}</span>
+              <div class="rows-selector">
+                <button
+                  v-for="size in pageSizeOptions"
+                  :key="size"
+                  class="rows-btn"
+                  :class="{ active: perPage === size }"
+                  @click="changePerPage(size)"
+                >
+                  {{ size }}
+                </button>
+              </div>
+            </div>
+
+            <div class="pagination-pages">
+              <button class="page-nav" :disabled="currentPage <= 1" @click="changePage(currentPage - 1)" :aria-label="t('common.previousPage')">
+                <ChevronLeft :size="16" />
+              </button>
+              <template v-for="page in visiblePages" :key="page">
+                <button
+                  v-if="page !== '...'"
+                  class="page-btn"
+                  :class="{ active: currentPage === page }"
+                  @click="changePage(page as number)"
+                >
+                  {{ page }}
+                </button>
+                <span v-else class="page-dots">…</span>
+              </template>
+              <button class="page-nav" :disabled="currentPage >= lastPage" @click="changePage(currentPage + 1)" :aria-label="t('common.nextPage')">
+                <ChevronRight :size="16" />
+              </button>
+            </div>
+
+            <div class="pagination-total">
+              {{ totalFrom }}-{{ totalTo }} {{ t('common.of') }} {{ filteredStudentRows.length }}
+            </div>
+          </div>
+        </template>
+      </DataTable>
+    </div>
+
+    <StudentReportCardModal
+      v-model="showReportCard"
+      :student-id="selectedStudentId"
+      :filters="filters"
+    />
+  </div>
+</template>
+
+<script setup lang="ts">
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
+import {
+  AlertTriangle,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  FileSpreadsheet,
+  FileText,
+  RefreshCw,
+  Sheet,
+  XCircle,
+} from '@lucide/vue'
+import SearchInput from '@/components/common/SearchInput.vue'
+import DataTable from '@/components/DataTable.vue'
+import LoadingState from '@/components/LoadingState.vue'
+import StudentReportCardModal from './StudentReportCardModal.vue'
+import { reportService } from '@/services/reportService'
+import { exportTableToCsv, exportTableToExcel, exportTableToPdf } from '@/utils/reportExport'
+import { extractErrorMessage } from '@/utils'
+import { GRADE_COLORS } from '@/constants'
+import { useThemeStore } from '@/stores/theme'
+import { usePermission } from '@/composables/usePermission'
+import { useToast } from '@/composables/useToast'
+import type { ReportFilterOptions, ReportFilters, StudentRankingRow } from '@/types'
+
+const { t } = useI18n()
+const theme = useThemeStore()
+const { hasPermission } = usePermission()
+const toast = useToast()
+
+const isDark = computed(() => theme.isDark)
+const canExport = computed(() => hasPermission('export-reports'))
+
+const loading = ref(true)
+const error = ref('')
+const showExportMenu = ref(false)
+const studentSearch = ref('')
+const showReportCard = ref(false)
+const selectedStudentId = ref<number | null>(null)
+
+const filters = reactive<ReportFilters>({
+  academic_year_id: null,
+  term_id: null,
+  class_id: null,
+  subject_id: null,
+  teacher_id: null,
+  generation_id: null,
+})
+
+const options = ref<ReportFilterOptions>({
+  academic_years: [],
+  generations: [],
+  terms: [],
+  classes: [],
+  subjects: [],
+  teachers: [],
+  grade_boundaries: [],
+  pass_mark: 50,
+})
+
+const studentRows = ref<StudentRankingRow[]>([])
+
+const activeFilterCount = computed(
+  () => Object.values(filters).filter((value) => value !== null && value !== undefined).length,
+)
+
+const currentPage = ref(1)
+const perPage = ref(10)
+const pageSizeOptions = [10, 25, 50, 75, 100]
+
+const filteredStudentRows = computed(() => {
+  const term = studentSearch.value.trim().toLowerCase()
+  if (!term) return studentRows.value
+  return studentRows.value.filter(
+    (row) =>
+      row.student_name.toLowerCase().includes(term) ||
+      (row.student_number ?? '').toLowerCase().includes(term) ||
+      row.class_name.toLowerCase().includes(term),
+  )
+})
+
+const lastPage = computed(() => Math.max(1, Math.ceil(filteredStudentRows.value.length / perPage.value)))
+
+const paginatedRows = computed(() => {
+  const start = (currentPage.value - 1) * perPage.value
+  const end = start + perPage.value
+  return filteredStudentRows.value.slice(start, end)
+})
+
+const totalFrom = computed(() => filteredStudentRows.value.length === 0 ? 0 : (currentPage.value - 1) * perPage.value + 1)
+const totalTo = computed(() => Math.min(currentPage.value * perPage.value, filteredStudentRows.value.length))
+
+const visiblePages = computed(() => {
+  const pages: (number | string)[] = []
+  const total = lastPage.value
+  const current = currentPage.value
+
+  if (total <= 7) {
+    for (let i = 1; i <= total; i++) pages.push(i)
+    return pages
+  }
+
+  pages.push(1)
+  if (current > 3) pages.push('...')
+
+  const start = Math.max(2, current - 1)
+  const end = Math.min(total - 1, current + 1)
+  for (let i = start; i <= end; i++) pages.push(i)
+
+  if (current < total - 2) pages.push('...')
+  pages.push(total)
+
+  return pages
+})
+
+function changePage(page: number) {
+  if (page < 1 || page > lastPage.value) return
+  currentPage.value = page
+}
+
+function changePerPage(size: number) {
+  perPage.value = size
+  currentPage.value = 1
+}
+
+const studentColumns = computed(() => [
+  { key: 'rank', label: '#', width: '56px' },
+  { key: 'student_name', label: t('reports.colStudent') },
+  { key: 'student_number', label: t('reports.colStudentId') },
+  { key: 'class_name', label: t('reports.colClass') },
+  { key: 'subject_count', label: t('reports.colSubjects') },
+  { key: 'total', label: t('reports.colTotal') },
+  { key: 'average', label: t('reports.colAverage') },
+  { key: 'grade', label: t('reports.colGrade') },
+  { key: 'result', label: t('reports.colResult') },
+  { key: 'actions', label: '', width: '140px' },
+])
+
+function gradeStyle(grade: string | null) {
+  const color = grade ? GRADE_COLORS[grade] : undefined
+  return color ? { color, background: `${color}1a` } : {}
+}
+
+function rankClass(rank: number): string {
+  if (rank === 1) return 'rank-gold'
+  if (rank === 2) return 'rank-silver'
+  if (rank === 3) return 'rank-bronze'
+  return ''
+}
+
+async function loadOptions() {
+  try {
+    options.value = await reportService.getFilterOptions()
+  } catch (e) {
+    error.value = extractErrorMessage(e)
+  }
+}
+
+async function loadAll() {
+  loading.value = true
+  error.value = ''
+  try {
+    studentRows.value = await reportService.getStudentRanking(filters)
+  } catch (e) {
+    error.value = extractErrorMessage(e)
+  } finally {
+    loading.value = false
+  }
+}
+
+function clearFilters() {
+  filters.academic_year_id = null
+  filters.term_id = null
+  filters.class_id = null
+  filters.subject_id = null
+  filters.teacher_id = null
+  filters.generation_id = null
+}
+
+function scopeLabel(): string {
+  const parts: string[] = []
+  const named = (list: Array<{ id: number; name: string }>, id: number | null | undefined) =>
+    list.find((item) => item.id === id)?.name
+
+  const year = named(options.value.academic_years, filters.academic_year_id)
+  const term = named(options.value.terms, filters.term_id)
+  const cls = named(options.value.classes, filters.class_id)
+  const subject = named(options.value.subjects, filters.subject_id)
+  const teacher = named(options.value.teachers, filters.teacher_id)
+  const generation = named(options.value.generations, filters.generation_id)
+
+  if (year) parts.push(year)
+  if (term) parts.push(term)
+  if (cls) parts.push(`${t('reports.classPrefix')} ${cls}`)
+  if (subject) parts.push(subject)
+  if (teacher) parts.push(`${t('reports.teacherPrefix')} ${teacher}`)
+  if (generation) parts.push(generation)
+
+  return parts.length ? parts.join(' · ') : t('reports.allScope')
+}
+
+async function runExport(format: 'pdf' | 'xlsx' | 'csv') {
+  showExportMenu.value = false
+  const    payload = {
+    title: t('reports.exportTitle'),
+    subtitle: scopeLabel(),
+    head: ['#', t('reports.colStudent'), t('reports.colStudentId'), t('reports.colClass'), t('reports.colSubjects'), t('reports.colTotal'), t('reports.colAverage'), t('reports.colGrade'), t('reports.failedSubjects'), t('reports.colResult')],
+    body: filteredStudentRows.value.map((row) => [
+      row.rank, row.student_name, row.student_number ?? '—', row.class_name, row.subject_count,
+      row.total.toFixed(2), row.average.toFixed(2), row.grade ?? '—', row.failed_subjects,
+      row.result.toUpperCase(),
+    ]),
+    filename: 'student-ranking-report',
+  }
+  try {
+    if (format === 'pdf') await exportTableToPdf(payload)
+    else if (format === 'xlsx') await exportTableToExcel(payload)
+    else exportTableToCsv(payload)
+    toast.success(t('reports.exportedAs', { format: format.toUpperCase() }))
+  } catch (e) {
+    toast.error(extractErrorMessage(e))
+  }
+}
+
+function openReportCard(studentId: number) {
+  selectedStudentId.value = studentId
+  showReportCard.value = true
+}
+
+function closeExportMenu(event: MouseEvent) {
+  if (!(event.target as HTMLElement).closest('.rp-export')) showExportMenu.value = false
+}
+
+watch(filters, () => {
+  currentPage.value = 1
+  loadAll()
+}, { deep: true })
+
+watch(studentSearch, () => {
+  currentPage.value = 1
+})
+
+onMounted(async () => {
+  document.addEventListener('click', closeExportMenu)
+  await loadOptions()
+  await loadAll()
+})
+
+onUnmounted(() => document.removeEventListener('click', closeExportMenu))
+</script>
+
+<style scoped>
+.report-page {
+  font-family: 'Inter', 'Noto Sans Khmer', sans-serif;
+  height: calc(100vh - 96px);
+  width: calc(100% + 12px);
+  margin-top: -6px;
+  margin-left: -6px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.rp-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  color: #475569;
+  border-radius: 10px;
+  padding: 0.45rem 0.8rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.rp-btn:hover:not(:disabled) { background: #f8fafc; border-color: #cbd5e1; }
+.rp-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.rp-btn-primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+.rp-btn-primary:hover:not(:disabled) { background: #1d4ed8; border-color: #1d4ed8; }
+
+.spinning { animation: spin 0.9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.rp-export { position: relative; }
+.rp-export-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  min-width: 190px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.12);
+  padding: 0.3rem;
+  z-index: 40;
+}
+.rp-export-menu button {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  padding: 0.5rem 0.65rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #475569;
+  cursor: pointer;
+}
+.rp-export-menu button:hover { background: #f1f5f9; color: #2563eb; }
+
+.rp-error {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: linear-gradient(135deg, #fef2f2, #fee2e2);
+  border: 1px solid #fecaca;
+  border-radius: 12px;
+  padding: 0.7rem 1rem;
+  margin-bottom: 1rem;
+  font-size: 0.82rem;
+  color: #991b1b;
+}
+.rp-error :deep(svg) { color: #ef4444; }
+.rp-error-retry {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  background: #ef4444;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 0.35rem 0.65rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.rp-filter { display: flex; flex-direction: column; gap: 0.2rem; min-width: 150px; flex: 1 1 150px; }
+.rp-filter label {
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #64748b;
+}
+.rp-select {
+  font-size: 0.8rem;
+  padding: 0.35rem 0.55rem;
+  border-radius: 9px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  color: #0f172a;
+  cursor: pointer;
+  width: 100%;
+}
+.rp-select:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15); }
+
+.rp-clear {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+  color: #dc2626;
+  border-radius: 9px;
+  padding: 0.4rem 0.7rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.rp-card {
+  background: #fff;
+  border: 1px solid #e9ecef;
+  border-radius: 16px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  flex: 1;
+  height: 1px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.rp-table-head-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.rp-table-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem;
+  padding: 0.85rem 0 0;
+  border-top: 1px solid #e9ecef;
+}
+.rp-table-title { font-size: 0.95rem; font-weight: 700; color: #0f172a; margin: 0; }
+.rp-table-sub { font-size: 0.72rem; color: #94a3b8; margin: 0.1rem 0 0; }
+
+.rp-rank {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  font-size: 0.72rem;
+  font-weight: 800;
+  background: #f1f5f9;
+  color: #64748b;
+}
+.rank-gold { background: rgba(245, 158, 11, 0.15); color: #d97706; }
+.rank-silver { background: rgba(148, 163, 184, 0.2); color: #475569; }
+.rank-bronze { background: rgba(249, 115, 22, 0.15); color: #ea580c; }
+
+.rp-grade {
+  display: inline-block;
+  min-width: 34px;
+  text-align: center;
+  font-size: 0.72rem;
+  font-weight: 800;
+  padding: 0.15rem 0.45rem;
+  border-radius: 6px;
+  background: rgba(148, 163, 184, 0.12);
+  color: #64748b;
+}
+.rp-result { font-size: 0.7rem; font-weight: 800; letter-spacing: 0.03em; }
+.rp-result.is-pass { color: #10b981; }
+.rp-result.is-fail { color: #ef4444; }
+.rp-muted { color: #94a3b8; font-size: 0.75rem; }
+
+.rp-row-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  color: #2563eb;
+  border-radius: 8px;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.rp-row-btn:hover { background: #eff6ff; border-color: #bfdbfe; }
+
+/* Make DataTable fill the flex height and remove its own border/background */
+.report-page :deep(.data-table-wrapper) {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: none !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  background: transparent !important;
+}
+.report-page :deep(.table-header) {
+  padding: 12px 20px;
+}
+.report-page :deep(.table-responsive) {
+  flex: 1;
+  overflow-y: auto;
+}
+.report-page :deep(.table-responsive::-webkit-scrollbar) {
+  width: 4px;
+  height: 4px;
+}
+.report-page :deep(.table-responsive::-webkit-scrollbar-track) {
+  background: transparent;
+}
+.report-page :deep(.table-responsive::-webkit-scrollbar-thumb) {
+  background: #d1d5db;
+  border-radius: 2px;
+}
+.report-page :deep(.table-responsive::-webkit-scrollbar-thumb:hover) {
+  background: #9ca3af;
+}
+.report-page :deep(.table-footer) {
+  padding: 0;
+}
+
+/* Dark mode */
+.dark-mode .rp-btn { background: rgba(30, 41, 59, 0.9); border-color: #475569; color: #cbd5e1; }
+.dark-mode .rp-btn-primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+.dark-mode .rp-card,
+.dark-mode .rp-export-menu { background: rgba(30, 41, 59, 0.95); border-color: rgba(71, 85, 105, 0.5); }
+.dark-mode .rp-select { background: rgba(51, 65, 85, 0.5); border-color: #475569; color: #e2e8f0; }
+.dark-mode .rp-table-title { color: #f1f5f9; }
+.dark-mode .rp-export-menu button { color: #cbd5e1; }
+.dark-mode .rp-export-menu button:hover { background: rgba(51, 65, 85, 0.6); color: #93c5fd; }
+.dark-mode .rp-rank { background: rgba(51, 65, 85, 0.6); color: #cbd5e1; }
+.dark-mode .rp-row-btn { background: rgba(51, 65, 85, 0.5); border-color: #475569; color: #93c5fd; }
+</style>
